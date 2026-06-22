@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "scripts/start-postgres-mcp.sh",
+      "args": [],
+      "env": {}
+    }
+  }
+}

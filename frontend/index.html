@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SW England Renewable Projects — Map Agent</title>
+
+  <!-- MapLibre GL JS — drop-in for Mapbox GL JS, no token. To use Mapbox: swap
+       these URLs, set mapboxgl.accessToken, rename maplibregl -> mapboxgl. -->
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+
+  <style>
+    :root { --bg:#0f1115; --panel:#171a21; --line:#262b35; --muted:#8a93a3; --accent:#4f8cff; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    #app { display: grid; grid-template-columns: 370px 1fr; height: 100%; }
+
+    #sidebar { background: var(--bg); color: #e6e9ef; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+    #sidebar header { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+    #sidebar header h1 { font-size: 15px; margin: 0; }
+    #sidebar header p { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.4; }
+
+    #log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .msg { padding: 9px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; max-width: 92%; white-space: pre-wrap; }
+    .user { background: var(--accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 3px; }
+    .assistant { background: var(--panel); border: 1px solid var(--line); align-self: flex-start; border-bottom-left-radius: 3px; }
+    .status { color: var(--muted); font-size: 12px; font-style: italic; align-self: flex-start; padding: 2px 4px; }
+    .error { background: #3a1d22; border: 1px solid #5c2a31; color: #ffb3bd; align-self: flex-start; }
+
+    #composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
+    #composer input { flex: 1; background: var(--panel); border: 1px solid var(--line); color: #e6e9ef; border-radius: 8px; padding: 10px 12px; font-size: 13px; outline: none; }
+    #composer input:focus { border-color: var(--accent); }
+    #composer button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 0 16px; font-size: 13px; cursor: pointer; }
+
+    #examples { padding: 0 12px 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+    #examples button { background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: 999px; padding: 5px 10px; font-size: 11px; cursor: pointer; }
+    #examples button:hover { border-color: var(--accent); color: #e6e9ef; }
+
+    #mapwrap { position: relative; }
+    #map { height: 100%; }
+    #legend { position: absolute; bottom: 16px; left: 16px; background: rgba(15,17,21,.88); color: #e6e9ef;
+              border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 11px; line-height: 1.7; z-index: 2; }
+    #legend b { font-size: 11px; display: block; margin-bottom: 4px; }
+    #legend .row { display: flex; align-items: center; gap: 6px; }
+    #legend .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+    #legend hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
+    .maplibregl-popup-content { font-family: system-ui, sans-serif; font-size: 12px; line-height: 1.5; padding: 10px 12px; }
+    .pop-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+    .pop-row { color: #333; }
+    .pop-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; color: #fff; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="sidebar">
+      <header>
+        <h1>⚡ SW England Renewable Projects</h1>
+        <p>Renewable-energy projects across South West England — public REPD data (solar, wind, battery, hydro, biomass). Ask me to find them, filter by development stage, and analyse them.</p>
+      </header>
+      <div id="log"></div>
+      <div id="examples"></div>
+      <form id="composer">
+        <input id="input" autocomplete="off" placeholder="e.g. operational solar over 10 MW" />
+        <button id="send" type="submit">Send</button>
+      </form>
+    </div>
+    <div id="mapwrap">
+      <div id="map"></div>
+      <div id="legend"></div>
+    </div>
+  </div>
+
+  <script>
+    const TECH = {
+      solar_ground: "#f1c40f", solar_rooftop: "#f39c12", wind: "#3498db",
+      bess: "#9b59b6", hydro: "#1abc9c", biomass: "#2ecc71",
+    };
+    const TECH_LABEL = {
+      solar_ground: "Ground solar", solar_rooftop: "Rooftop solar", wind: "Wind",
+      bess: "Battery", hydro: "Hydro", biomass: "Biomass",
+    };
+    const STATUS_LABEL = {
+      operational: "Operational", under_construction: "Under construction",
+      awaiting_construction: "Awaiting construction", submitted: "Application submitted",
+    };
+    const STATUS_COLOR = {
+      operational: "#2ecc71", under_construction: "#e67e22",
+      awaiting_construction: "#3498db", submitted: "#8a93a3",
+    };
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: "https://tiles.openfreemap.org/styles/liberty",
+      center: [-3.2, 50.9],   // South West England
+      zoom: 8,
+    });
+    map.addControl(new maplibregl.NavigationControl(), "top-right");
+
+    const layers = new Set();
+
+    function removeLayer(id) {
+      [id, id + "-outline"].forEach(l => { if (map.getLayer(l)) map.removeLayer(l); });
+      if (map.getSource(id)) map.removeSource(id);
+      layers.delete(id);
+    }
+
+    function addGeojsonLayer({ layer_id, geojson, geom_type, color }) {
+      removeLayer(layer_id);
+      map.addSource(layer_id, { type: "geojson", data: geojson });
+      if (geom_type === "fill") {
+        map.addLayer({ id: layer_id, type: "fill", source: layer_id,
+          paint: { "fill-color": color, "fill-opacity": 0.18 } });
+        map.addLayer({ id: layer_id + "-outline", type: "line", source: layer_id,
+          paint: { "line-color": color, "line-width": 2 } });
+      } else {
+        map.addLayer({ id: layer_id, type: "circle", source: layer_id,
+          paint: { "circle-radius": 6, "circle-color": color, "circle-stroke-width": 1.5, "circle-stroke-color": "#fff" } });
+      }
+      layers.add(layer_id);
+    }
+
+    // Projects: colour = technology (per-feature 'color'), size = capacity (MW).
+    function addProjects({ layer_id, geojson }) {
+      removeLayer(layer_id);
+      map.addSource(layer_id, { type: "geojson", data: geojson });
+      map.addLayer({
+        id: layer_id, type: "circle", source: layer_id,
+        paint: {
+          "circle-color": ["get", "color"],
+          "circle-stroke-color": "#fff",
+          "circle-stroke-width": 1.5,
+          "circle-radius": ["interpolate", ["linear"],
+            ["coalesce", ["get", "capacity_mw"], 3], 0, 6, 10, 12, 100, 28],
+          "circle-opacity": 0.85,
+        },
+      });
+      map.on("click", layer_id, (e) => popupFor(e.features[0], e.lngLat));
+      map.on("mouseenter", layer_id, () => map.getCanvas().style.cursor = "pointer");
+      map.on("mouseleave", layer_id, () => map.getCanvas().style.cursor = "");
+      layers.add(layer_id);
+    }
+
+    function popupFor(f, lngLat) {
+      const p = f.properties;
+      const color = p.color || "#888";
+      const mw = (p.capacity_mw != null && p.capacity_mw !== "") ? `${(+p.capacity_mw).toFixed(1)} MW` : "—";
+      const status = p.status
+        ? `<span class="pop-tag" style="background:${STATUS_COLOR[p.status] || '#888'}">${STATUS_LABEL[p.status] || p.status}</span>` : "";
+      new maplibregl.Popup({ maxWidth: "260px" }).setLngLat(lngLat).setHTML(
+        `<div class="pop-title">${p.title}</div>
+         <div class="pop-row"><span class="pop-tag" style="background:${color}">${TECH_LABEL[p.technology] || p.technology}</span> · ${mw}</div>
+         <div class="pop-row">${p.county || ""}${p.operator ? " · " + p.operator : ""}</div>
+         ${status ? `<div class="pop-row" style="margin-top:4px">${status}</div>` : ""}
+         <div class="pop-row" style="color:#888;margin-top:4px">REPD ref ${p.ref_id || "—"}</div>`
+      ).addTo(map);
+    }
+
+    function runMapCommand(cmd) {
+      const a = cmd.args || {};
+      switch (cmd.command) {
+        case "fly_to": map.flyTo({ center: [a.longitude, a.latitude], zoom: a.zoom ?? 12 }); break;
+        case "fit_bounds": { const [w, s, e, n] = a.bbox;
+          map.fitBounds([[w, s], [e, n]], { padding: 70, maxZoom: 13, duration: 800 }); break; }
+        case "add_projects": addProjects(a); break;
+        case "add_geojson_layer": addGeojsonLayer(a); break;
+        case "set_layer_color":
+          if (map.getLayer(a.layer_id)) {
+            const t = map.getLayer(a.layer_id).type;
+            map.setPaintProperty(a.layer_id, t === "fill" ? "fill-color" : "circle-color", a.color);
+            if (map.getLayer(a.layer_id + "-outline")) map.setPaintProperty(a.layer_id + "-outline", "line-color", a.color);
+          } break;
+        case "set_layer_visibility": {
+          const v = a.visible ? "visible" : "none";
+          [a.layer_id, a.layer_id + "-outline"].forEach(l => { if (map.getLayer(l)) map.setLayoutProperty(l, "visibility", v); });
+          break; }
+        case "clear": [...layers].forEach(removeLayer); break;
+      }
+    }
+
+    // ---- Legend ----
+    document.getElementById("legend").innerHTML =
+      "<b>Technology</b>" +
+      Object.keys(TECH_LABEL).map(k =>
+        `<div class="row"><span class="dot" style="background:${TECH[k]}"></span>${TECH_LABEL[k]}</div>`).join("") +
+      "<hr><div style='color:#8a93a3'>size = capacity (MW)</div>";
+
+    // ---- Chat + websocket ----
+    const log = document.getElementById("log");
+    const input = document.getElementById("input");
+    const form = document.getElementById("composer");
+    const sendBtn = document.getElementById("send");
+
+    function bubble(text, cls) {
+      const div = document.createElement("div");
+      div.className = "msg " + cls; div.textContent = text;
+      log.appendChild(div); log.scrollTop = log.scrollHeight;
+    }
+
+    let socket, busy = false;
+    function connect() {
+      socket = new WebSocket(`ws://${location.host}/ws`);
+      socket.onmessage = (ev) => {
+        const m = JSON.parse(ev.data);
+        if (m.type === "assistant_text") bubble(m.text, "assistant");
+        else if (m.type === "status") bubble(m.text, "status");
+        else if (m.type === "error") bubble(m.text, "error");
+        else if (m.type === "map_command") runMapCommand(m);
+        else if (m.type === "done") { busy = false; sendBtn.disabled = false; input.disabled = false; input.focus(); }
+      };
+      socket.onclose = () => setTimeout(connect, 1000);
+    }
+    connect();
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text || busy || socket.readyState !== WebSocket.OPEN) return;
+      bubble(text, "user");
+      socket.send(JSON.stringify({ type: "user_message", text }));
+      input.value = ""; busy = true; sendBtn.disabled = true; input.disabled = true;
+    });
+
+    const examples = [
+      "Show all operational solar",
+      "Projects within 25km of Exeter",
+      "Biggest battery storage projects",
+      "Break down projects by county",
+      "Submitted wind projects over 20 MW",
+      "Clear the map",
+    ];
+    const exBox = document.getElementById("examples");
+    examples.forEach((t) => {
+      const b = document.createElement("button");
+      b.textContent = t;
+      b.onclick = () => { input.value = t; form.requestSubmit(); };
+      exBox.appendChild(b);
+    });
+  </script>
+</body>
+</html>
