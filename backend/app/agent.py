@@ -149,6 +149,8 @@ async def run_turn(client, history, user_text, send, pool: asyncpg.Pool) -> None
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
+            if not isinstance(args, dict):  # model may emit "null" for no-arg calls
+                args = {}
             await send({"type": "status", "text": _status_text(name, args)})
             handler = HANDLERS.get(name)
             try:
