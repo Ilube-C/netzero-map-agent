@@ -9,16 +9,17 @@ primary_region = "lhr"
   dockerfile = "Dockerfile"
 
 [env]
-  OPENAI_BASE_URL = "https://api.groq.com/openai/v1"
-  GROQ_MODEL = "llama-3.3-70b-versatile"
-  # Public demo guardrails — see backend/app/limits.py. Sized to what Groq's
-  # free tier actually allows, measured: one model call is ~2.3k tokens and a
-  # tool-using turn takes 2-3 of them, against a hard ceiling of 100k tokens
-  # PER DAY. That is ~16 turns a day in total, across every visitor — so the
-  # budget below is deliberately tiny. Raise it the moment the key is upgraded
-  # to a paid tier, or OPENAI_BASE_URL is pointed at a more generous provider.
-  RATE_LIMIT_PER_MINUTE = "5"
-  DAILY_TURN_BUDGET = "15"
+  # Gemini's OpenAI-compatible endpoint. Groq's free tier caps at 100k tokens
+  # a day (~16 turns) and its console rejects the account's email domain, so
+  # the tier could not be raised; Gemini's free tier allows ~1500 requests a
+  # day with no daily token ceiling.
+  OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+  GROQ_MODEL = "gemini-3.6-flash"
+  # Public demo guardrails — see backend/app/limits.py. Sized to Gemini's free
+  # tier: ~1500 requests/day and 10 requests/minute. A tool-using turn costs
+  # 2-3 requests, so ~400 turns a day and ~4 a minute keep us inside it.
+  RATE_LIMIT_PER_MINUTE = "4"
+  DAILY_TURN_BUDGET = "400"
   MAX_MESSAGE_CHARS = "500"
 
 [http_service]

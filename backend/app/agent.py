@@ -147,6 +147,25 @@ async def _complete(client, history):
     raise ModelBusy
 
 
+def _echo_tool_call(tc) -> dict:
+    """Rebuild a tool call for the history, keeping provider-specific extras.
+
+    Gemini 3 attaches a `thought_signature` under extra_content and rejects the
+    follow-up call with 400 unless it comes back alongside the tool result. It
+    is opaque to us, so pass it through untouched. Providers that send no
+    extras (Groq) are unaffected.
+    """
+    call = {
+        "id": tc.id,
+        "type": "function",
+        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+    }
+    extra = (getattr(tc, "model_extra", None) or {}).get("extra_content")
+    if extra:
+        call["extra_content"] = extra
+    return call
+
+
 def _trim(history: list[dict]) -> None:
     """Drop the oldest turns once history is too long.
 
@@ -201,11 +220,7 @@ async def run_turn(client, history, user_text, send, pool: asyncpg.Pool) -> None
         tool_calls = msg.tool_calls or []
         entry: dict = {"role": "assistant", "content": msg.content or ""}
         if tool_calls:
-            entry["tool_calls"] = [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in tool_calls
-            ]
+            entry["tool_calls"] = [_echo_tool_call(tc) for tc in tool_calls]
         history.append(entry)
 
         if msg.content and msg.content.strip():
