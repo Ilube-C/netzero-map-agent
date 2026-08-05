@@ -167,14 +167,22 @@ async def run_turn(client, history, user_text, send, pool: asyncpg.Pool) -> None
     """
     _trim(history)
     history.append({"role": "user", "content": user_text})
+    rendered = False  # did any tool already put results on the map this turn?
 
     for _ in range(MAX_STEPS):
         try:
             resp = await _complete(client, history)
         except ModelBusy:
+            # A turn costs several model calls, so the budget can run out after
+            # the data tool has already drawn its layer. Say so, rather than
+            # showing a bare error over a map that is in fact full of results.
             await send({"type": "error",
-                        "text": "The free model tier is busy right now — "
-                                "give it a few seconds and ask again."})
+                        "text": "Results are on the map, but the model ran out of "
+                                "capacity before writing the summary — ask again in "
+                                "a moment for the numbers."
+                        if rendered else
+                        "The free model tier is busy right now — "
+                        "give it a few seconds and ask again."})
             if history and history[-1].get("role") == "user":
                 history.pop()
             break
@@ -221,6 +229,7 @@ async def run_turn(client, history, user_text, send, pool: asyncpg.Pool) -> None
                     result = f"Error: unknown tool '{name}'."
                 else:
                     result = await handler(args, send, pool)
+                    rendered = True
             except Exception as exc:  # surface to the model so it can recover
                 result = f"Error running {name}: {exc}"
             history.append({"role": "tool", "tool_call_id": tc.id, "content": result})
