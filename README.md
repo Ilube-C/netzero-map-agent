@@ -121,10 +121,17 @@ There's no login, so the deployment protects the model key on three levels
 
 The daily budget looks absurdly small until you measure the model tier. One
 model call costs ~2.3k tokens (system prompt + ten tool schemas), and a
-tool-using turn takes 2–3 calls, so a turn is ~5–7k tokens. **Groq's free tier
-allows 100,000 tokens per day** — roughly **16 turns a day in total, across all
+tool-using turn takes 2–3 calls. **Groq's free tier allows 100,000 tokens per
+day**, as a rolling window — roughly **16 turns a day in total, across all
 visitors**. The budget is set just under that so the app refuses politely
 ("hit its daily query budget") instead of leaking a raw `429`.
+
+One non-obvious detail: Groq checks the limit against `prompt + max_tokens`,
+not against what the model actually returns. `max_tokens` is therefore set to
+512 rather than 2048 — replies are a one-sentence confirmation plus tool calls
+(~33 completion tokens measured), so the larger value reserved ~1.5k tokens per
+call that were never used, and caused 429s well before the real budget was
+spent.
 
 When the upstream limit is hit anyway, `agent.py` waits out the `retry-after`
 once and then reports "the free model tier is busy". The OpenAI SDK's own retry

@@ -117,7 +117,13 @@ async def _complete(client, history):
         try:
             return await client.chat.completions.create(
                 model=MODEL,
-                max_tokens=2048,
+                # Groq checks its rate limit against prompt + max_tokens, not
+                # against what the model actually returns, so an oversized
+                # max_tokens reserves quota we never use and triggers 429s
+                # early. Replies here are a one-sentence confirmation plus tool
+                # calls — measured at ~33 completion tokens — so 512 is ample
+                # and cuts the reserved cost per call by roughly 1.5k tokens.
+                max_tokens=512,
                 temperature=0.2,  # steadier tool-call formatting
                 messages=[{"role": "system", "content": SYSTEM}] + history,
                 tools=OPENAI_TOOLS,
