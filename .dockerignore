@@ -1,0 +1,9 @@
+.git
+.venv
+backend/.venv
+**/__pycache__
+**/*.pyc
+.env
+backend/.env
+scripts/repd.csv
+README.md

@@ -80,6 +80,62 @@ uvicorn app.main:app --reload
 **3. Open** http://localhost:8000 and try the example chips, e.g.
 *"battery projects within 25 km of Exeter"*.
 
+## Deploy (Fly.io)
+
+Two apps on Fly's private network: the FastAPI app (public, TLS + `wss://`
+terminated by Fly) and PostGIS (no public IP, reachable only at
+`netzero-map-db.internal`).
+
+```bash
+# 1. PostGIS — deployed from the repo root so it bakes in the same db/init.sql
+#    that docker-compose mounts locally.
+flyctl apps create netzero-map-db
+flyctl volumes create pgdata --app netzero-map-db --region lhr --size 1
+flyctl secrets set POSTGRES_PASSWORD=<pw> --app netzero-map-db
+flyctl deploy --config deploy/postgis/fly.toml --dockerfile deploy/postgis/Dockerfile
+
+# 2. App
+flyctl apps create netzero-map-agent
+flyctl secrets set \
+  GROQ_API_KEY=<key> \
+  DATABASE_URL="postgresql://map:<pw>@netzero-map-db.internal:5432/map" \
+  --app netzero-map-agent
+flyctl deploy
+```
+
+`min_machines_running = 1` and `auto_stop_machines = false` keep it up 24/7 —
+scale-to-zero would drop the websocket and put a cold start in front of the
+first question. `/healthz` is the Fly health check and only passes if PostGIS
+actually answers a query.
+
+### Public-demo limits
+
+There's no login, so the deployment protects the model key on three levels
+(`backend/app/limits.py`, all tunable via `[env]` in `fly.toml`):
+
+| Limit | Default | Why |
+|---|---|---|
+| Per-IP turns/minute | 5 | burst protection |
+| Global turns/day | 15 | matches the free model key's real ceiling |
+| Message length | 500 chars | keeps prompt size predictable |
+
+The daily budget looks absurdly small until you measure the model tier. One
+model call costs ~2.3k tokens (system prompt + ten tool schemas), and a
+tool-using turn takes 2–3 calls, so a turn is ~5–7k tokens. **Groq's free tier
+allows 100,000 tokens per day** — roughly **16 turns a day in total, across all
+visitors**. The budget is set just under that so the app refuses politely
+("hit its daily query budget") instead of leaking a raw `429`.
+
+When the upstream limit is hit anyway, `agent.py` waits out the `retry-after`
+once and then reports "the free model tier is busy". The OpenAI SDK's own retry
+ladder is disabled (`max_retries=0`) — left on, it sits in backoff for minutes
+and is indistinguishable from a hang.
+
+To serve a real audience, either upgrade the Groq key to a paid tier, or point
+`OPENAI_BASE_URL` at a provider with a more generous free tier (Gemini's free
+tier allows ~1,500 requests/day and no daily token cap). Only two env vars
+change; no code does. Raise `DAILY_TURN_BUDGET` to match.
+
 ## Map provider
 
 The map uses **MapLibre GL JS + OpenFreeMap** so it runs with no access token.

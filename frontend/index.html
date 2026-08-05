@@ -199,7 +199,9 @@
 
     let socket, busy = false;
     function connect() {
-      socket = new WebSocket(`ws://${location.host}/ws`);
+      // wss:// behind TLS — a hardcoded ws:// is blocked as mixed content on https.
+      const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+      socket = new WebSocket(`${scheme}//${location.host}/ws`);
       socket.onmessage = (ev) => {
         const m = JSON.parse(ev.data);
         if (m.type === "assistant_text") bubble(m.text, "assistant");

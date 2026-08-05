@@ -1,0 +1,23 @@
+# PostGIS machine. Deliberately has no [http_service] and no allocated public
+# IP: it is reachable only from the app over Fly's private network, at
+#   netzero-map-db.internal:5432
+app = "netzero-map-db"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  POSTGRES_USER = "map"
+  POSTGRES_DB = "map"
+  # POSTGRES_PASSWORD is set with `flyctl secrets set`, not here.
+
+[mounts]
+  source = "pgdata"
+  destination = "/var/lib/postgresql/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# No auto_stop: the database must stay up for the app to serve traffic 24/7.

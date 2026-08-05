@@ -14,14 +14,22 @@ To switch backends, change OPENAI_BASE_URL + the API key env var:
 import json
 import os
 
+import asyncio
+
 import asyncpg
-from openai import AsyncOpenAI, BadRequestError
+from openai import AsyncOpenAI, BadRequestError, RateLimitError
 
 from .tools import HANDLERS, TOOLS
 
 BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 MAX_STEPS = 8  # guard against runaway tool loops
+# A public connection can be held open indefinitely; cap the history it accrues
+# so per-call token cost stays bounded.
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "40"))
+# Groq's free tier allows 12k tokens/minute and one call costs ~2.3k, so a busy
+# moment returns 429. Wait briefly and retry rather than surfacing a raw error.
+_RATE_LIMIT_MAX_WAIT = float(os.environ.get("RATE_LIMIT_MAX_WAIT", "8"))
 
 SYSTEM = """You are an analyst's assistant for a map of renewable-energy projects across South West England (Bristol/Avon, Bath, Somerset, North Somerset, Gloucestershire, Wiltshire, Dorset, Devon, Cornwall). The data is the public DESNZ Renewable Energy Planning Database (REPD).
 
@@ -57,6 +65,10 @@ def make_client() -> AsyncOpenAI:
     return AsyncOpenAI(
         base_url=BASE_URL,
         api_key=os.environ.get("GROQ_API_KEY", os.environ.get("OPENAI_API_KEY", "")),
+        # The SDK's own retry ladder silently sits in backoff for minutes on a
+        # 429; _complete() handles retries with a bounded wait instead.
+        max_retries=0,
+        timeout=30.0,
     )
 
 
@@ -76,6 +88,20 @@ def _status_text(name: str, args: dict) -> str:
     }.get(name, f"Running {name}…")
 
 
+class ModelBusy(Exception):
+    """The upstream model is rate-limited and retrying didn't clear it."""
+
+
+def _retry_after(exc: RateLimitError) -> float:
+    """Seconds Groq asks us to wait, clamped so a user isn't left hanging."""
+    response = getattr(exc, "response", None)
+    value = response.headers.get("retry-after") if response is not None else None
+    try:
+        return min(float(value), _RATE_LIMIT_MAX_WAIT)
+    except (TypeError, ValueError):
+        return 3.0
+
+
 def _is_tool_format_error(exc: BadRequestError) -> bool:
     # Groq returns 400 `tool_use_failed` when Llama emits a malformed tool call
     # (e.g. "<function=search_pois ...>" instead of valid JSON). It's stochastic,
@@ -84,9 +110,10 @@ def _is_tool_format_error(exc: BadRequestError) -> bool:
 
 
 async def _complete(client, history):
-    """Call the model, retrying transient malformed-tool-call errors."""
+    """Call the model, retrying malformed-tool-call errors and 429s."""
     last_exc = None
-    for _ in range(3):
+    rate_limited = 0
+    for _ in range(4):
         try:
             return await client.chat.completions.create(
                 model=MODEL,
@@ -96,12 +123,31 @@ async def _complete(client, history):
                 tools=OPENAI_TOOLS,
                 tool_choice="auto",
             )
+        except RateLimitError as exc:
+            rate_limited += 1
+            if rate_limited > 2:
+                raise ModelBusy from exc
+            await asyncio.sleep(_retry_after(exc))
         except BadRequestError as exc:
             if _is_tool_format_error(exc):
                 last_exc = exc
                 continue
             raise
-    raise last_exc
+    if last_exc is not None:
+        raise last_exc
+    raise ModelBusy
+
+
+def _trim(history: list[dict]) -> None:
+    """Drop the oldest turns once history is too long.
+
+    Trims to a `user` boundary so an assistant message carrying tool_calls is
+    never separated from the tool results that answer it — the API rejects that.
+    """
+    while len(history) > MAX_HISTORY_MESSAGES:
+        del history[0]
+        while history and history[0].get("role") != "user":
+            del history[0]
 
 
 async def run_turn(client, history, user_text, send, pool: asyncpg.Pool) -> None:
@@ -110,11 +156,19 @@ async def run_turn(client, history, user_text, send, pool: asyncpg.Pool) -> None
     `history` holds OpenAI-format messages (user / assistant / tool); the system
     prompt is prepended per request and not stored.
     """
+    _trim(history)
     history.append({"role": "user", "content": user_text})
 
     for _ in range(MAX_STEPS):
         try:
             resp = await _complete(client, history)
+        except ModelBusy:
+            await send({"type": "error",
+                        "text": "The free model tier is busy right now — "
+                                "give it a few seconds and ask again."})
+            if history and history[-1].get("role") == "user":
+                history.pop()
+            break
         except BadRequestError as exc:
             if _is_tool_format_error(exc):
                 await send({"type": "assistant_text",

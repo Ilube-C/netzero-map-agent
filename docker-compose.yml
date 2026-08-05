@@ -1,7 +1,26 @@
 services:
+  app:
+    build: .
+    container_name: netzero-map-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - backend/.env          # GROQ_API_KEY
+    environment:
+      # Overrides the localhost DSN in backend/.env — inside the compose
+      # network the database is reachable by service name.
+      DATABASE_URL: postgresql://map:map@db:5432/map
+      RATE_LIMIT_PER_MINUTE: "5"
+      DAILY_TURN_BUDGET: "15"
+    depends_on:
+      db:
+        condition: service_healthy
+
   db:
     image: postgis/postgis:16-3.4
     container_name: netzero-map-postgis
+    restart: unless-stopped
     environment:
       POSTGRES_USER: map
       POSTGRES_PASSWORD: map

@@ -1,0 +1,44 @@
+# FastAPI app + static frontend.
+# Secrets (set with `flyctl secrets set`, never committed):
+#   GROQ_API_KEY   the model key
+#   DATABASE_URL   postgresql://map:<pw>@netzero-map-db.internal:5432/map
+app = "netzero-map-agent"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  OPENAI_BASE_URL = "https://api.groq.com/openai/v1"
+  GROQ_MODEL = "llama-3.3-70b-versatile"
+  # Public demo guardrails — see backend/app/limits.py. Sized to what Groq's
+  # free tier actually allows, measured: one model call is ~2.3k tokens and a
+  # tool-using turn takes 2-3 of them, against a hard ceiling of 100k tokens
+  # PER DAY. That is ~16 turns a day in total, across every visitor — so the
+  # budget below is deliberately tiny. Raise it the moment the key is upgraded
+  # to a paid tier, or OPENAI_BASE_URL is pointed at a more generous provider.
+  RATE_LIMIT_PER_MINUTE = "5"
+  DAILY_TURN_BUDGET = "15"
+  MAX_MESSAGE_CHARS = "500"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # 24/7: never suspend, and always keep one machine running. Scale-to-zero
+  # would drop the websocket and add a cold start to the first question.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  # 256mb is ample: uvicorn + asyncpg + an httpx client. The database is the
+  # side that wants headroom, and it gets 512mb in deploy/postgis/fly.toml.
+  memory = "256mb"
